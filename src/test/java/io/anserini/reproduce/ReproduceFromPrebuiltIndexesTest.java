@@ -16,7 +16,14 @@
 
 package io.anserini.reproduce;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.stream.Collectors;
+
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -40,7 +47,7 @@ public class ReproduceFromPrebuiltIndexesTest extends StdOutStdErrRedirectableLu
     super.tearDown();
   }
 
-    @Test
+  @Test
   public void testInvalidOption() throws Exception {
     ReproduceFromPrebuiltIndexes.main(new String[] {"--invalid"});
 
@@ -75,27 +82,123 @@ public class ReproduceFromPrebuiltIndexesTest extends StdOutStdErrRedirectableLu
   }
 
   @Test
-  public void testBeirCoreDryRun() throws Exception {
-    ReproduceFromPrebuiltIndexes.main(new String[] {"--config", "beir.core", "--dry-run"});
+  public void testShowConfig() throws Exception {
+    ReproduceFromPrebuiltIndexes.main(new String[] {"--config", "cacm", "--show"});
 
-    assertTrue(out.toString().startsWith("# Running condition"));
+    assertTrue(out.toString().startsWith("conditions:"));
+    assertTrue(out.toString().contains("name: bm25"));
+    assertTrue(out.toString().contains("index cacm"));
   }
 
   @Test
-  public void testBeirCorePrintCommandsDryRun() throws Exception {
-    ReproduceFromPrebuiltIndexes.main(new String[] {"--config", "beir.core", "--dry-run", "--print-commands"});
+  public void testBeirDryRun() throws Exception {
+    ReproduceFromPrebuiltIndexes.main(new String[] {"--config", "beir", "--dry-run"});
 
-    assertTrue(out.toString().startsWith("# Running condition"));
+    assertTrue(out.toString().startsWith("Indexes referenced by this run"));
+    assertTrue(out.toString().contains("Total size across"));
+    assertTrue(out.toString().contains("# Running condition"));
     assertTrue(out.toString().contains("Retrieval command"));
     assertTrue(out.toString().contains("Eval command"));
   }
 
   @Test
-  public void testComputeIndexSize() throws Exception {
-    ReproduceFromPrebuiltIndexes.main(new String[] {"--config", "beir.core", "--dry-run", "--compute-index-size"});
+  public void testCacmEndToEnd() throws Exception {
+    Path runsDirectory = createTempDir("runs");
+    Locale previousLocale = Locale.getDefault();
 
-    String s = out.toString();
-    assertTrue(s.contains("Indexes referenced by this run"));
-    assertTrue(s.contains("Total size across"));
+    try {
+      Locale.setDefault(Locale.forLanguageTag("ar-LB"));
+      ReproduceFromPrebuiltIndexes.main(new String[] {
+          "--config", "cacm",
+          "--runs-directory", runsDirectory.toString()
+      });
+    } finally {
+      Locale.setDefault(previousLocale);
+    }
+
+    String output = out.toString();
+    assertTrue(output, output.contains("Run successfully completed!"));
+    assertTrue(output, output.contains("Indexes referenced by this run (1 total):"));
+    assertTrue(output, output.contains("Total size across 1 of 1 indexes:"));
+    assertTrue(output, output.contains("MAP: 0.3123"));
+    assertTrue(output, output.contains("P30: 0.1942"));
+    assertTrue(output, output.matches("(?s).*Duration:\\s+[0-9]{2}:[0-9]{2}:[0-9]{2}.*"));
+    assertFalse(output.contains("NumberFormatException"));
+    assertTrue(Files.exists(runsDirectory.resolve("run.cacm.bm25.cacm.txt")));
+  }
+
+  @Test
+  public void testFaultyConfigSkipsEvaluation() throws Exception {
+    Path runsDirectory = createTempDir("runs");
+
+    ReproduceFromPrebuiltIndexes.main(new String[] {
+        "--config", "faulty",
+        "--runs-directory", runsDirectory.toString()
+    });
+
+    String output = out.toString();
+    assertTrue(output, output.contains("# Running condition \"retrieval-fails\""));
+    assertTrue(output, output.contains("Run failed!"));
+    assertTrue(output, output.contains("Skipping evaluation because retrieval failed."));
+    assertTrue(output, output.contains("# Running condition \"missing-run-file\""));
+    assertTrue(output, output.contains("Run successfully completed!"));
+    assertTrue(output, output.contains("Skipping evaluation because run file was not created: " + runsDirectory.resolve("run.faulty.missing-run-file.cacm.txt")));
+    assertFalse(output.contains("NumberFormatException"));
+    assertFalse(Files.exists(runsDirectory.resolve("run.faulty.retrieval-fails.cacm.txt")));
+    assertFalse(Files.exists(runsDirectory.resolve("run.faulty.missing-run-file.cacm.txt")));
+  }
+
+  @Test
+  public void testRenderSummaryTable() {
+    ReproduceFromPrebuiltIndexes.Config config = new ReproduceFromPrebuiltIndexes.Config();
+
+    ReproduceFromPrebuiltIndexes.Condition firstCondition = new ReproduceFromPrebuiltIndexes.Condition();
+    firstCondition.name = "cond-a";
+    ReproduceFromPrebuiltIndexes.Topic firstTopic = new ReproduceFromPrebuiltIndexes.Topic();
+    firstTopic.topic_key = "topic-a";
+    firstTopic.expected_scores = new LinkedHashMap<>();
+    firstTopic.expected_scores.put("MRR@10", 0.1234);
+    firstTopic.expected_scores.put("R@1K", 0.5678);
+    firstCondition.topics = Arrays.asList(firstTopic);
+
+    ReproduceFromPrebuiltIndexes.Condition secondCondition = new ReproduceFromPrebuiltIndexes.Condition();
+    secondCondition.name = "cond-b";
+    ReproduceFromPrebuiltIndexes.Topic secondTopic = new ReproduceFromPrebuiltIndexes.Topic();
+    secondTopic.topic_key = "topic-b";
+    secondTopic.expected_scores = new LinkedHashMap<>();
+    secondTopic.expected_scores.put("MAP", 0.9876);
+    secondCondition.topics = Arrays.asList(secondTopic);
+
+    config.conditions = Arrays.asList(firstCondition, secondCondition);
+
+    String summary = ReproduceFromPrebuiltIndexes.renderSummaryTable(config);
+    assertTrue(summary.startsWith("Summary"));
+    assertTrue(summary.contains("condition"));
+    assertTrue(summary.contains("topic"));
+    assertTrue(summary.contains("metric"));
+    assertTrue(summary.contains("expected"));
+    assertTrue(summary.contains("cond-a"));
+    assertTrue(summary.contains("topic-a"));
+    assertTrue(summary.contains("MRR@10"));
+    assertTrue(summary.contains("0.1234"));
+    assertTrue(summary.contains("R@1K"));
+    assertTrue(summary.contains("0.5678"));
+    List<String> lines = summary.lines().collect(Collectors.toList());
+    int firstConditionLastRow = -1;
+    int secondConditionFirstRow = -1;
+    for (int i = 0; i < lines.size(); i++) {
+      String line = lines.get(i);
+      if (line.startsWith("cond-a")) {
+        firstConditionLastRow = i;
+      } else if (line.startsWith("cond-b")) {
+        secondConditionFirstRow = i;
+        break;
+      }
+    }
+    assertTrue(firstConditionLastRow >= 0);
+    assertTrue(secondConditionFirstRow > firstConditionLastRow + 1);
+    assertEquals("", lines.get(secondConditionFirstRow - 1));
+    assertTrue(summary.contains("MAP"));
+    assertTrue(summary.contains("0.9876"));
   }
 }
